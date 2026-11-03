@@ -6,7 +6,7 @@ A terminal UI for keeping an eye on a folder full of git repos. See every repo's
 
 ## Features
 
-- **One view of every repo** in a folder: branch, ahead/behind its upstream, number of changed files.
+- **One view of every repo** in a folder, plus any others you list in a `.repotui.conf`: branch, ahead/behind its upstream, number of changed files.
 - **Live**: re-reads every repo every 3 seconds, so changes made in your editor or another terminal show up on their own.
 - **Switch branches** from a filterable picker that includes branches that only exist on the remote.
 - **Pull, fetch, stash and jump to master/main** for one repo or all of them at once.
@@ -35,7 +35,23 @@ go build -o repotui .
 repotui ~/code
 ```
 
-Pass the folder that contains your repos. repotui looks at its direct subfolders and lists every one that is a git repo. With no argument it uses `~/redberry/plannr`.
+Pass the folder that contains your repos, or run it with no argument from inside that folder. repotui lists every direct subfolder that is a git repo.
+
+### Repos in other places
+
+If some of your repos live somewhere else, list them in a `.repotui.conf` file in the folder you run repotui from:
+
+```
+# repos that live outside this folder
+~/code/plannr-sdk
+sdk = ~/some/other/place/plannr-nuxt-api-sdk
+../tools/cli
+```
+
+- One repo per line. Add `name =` in front to show it under a different name; otherwise the folder name is used.
+- `~` means your home folder, and relative paths are relative to the folder the config is in.
+- Blank lines and lines starting with `#` are ignored.
+- These repos are listed together with the ones found in the folder, sorted by name. A path that doesn't exist or isn't a git repo shows up in red instead of being skipped.
 
 ### Keys
 

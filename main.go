@@ -477,7 +477,9 @@ func (m model) header(w int) string {
 	if behind > 0 {
 		summary += dimStyle.Render(" · ") + warnStyle.Render(fmt.Sprintf("%d behind", behind))
 	}
-	left := badgeStyle.Render(" ⎇ repotui ") + dimStyle.Render("  "+tildify(m.root))
+	badge := badgeStyle.Render(" ⎇ repotui ")
+	pathW := w - lipgloss.Width(badge) - lipgloss.Width(summary) - 5
+	left := badge + dimStyle.Render("  "+truncate(tildify(m.root), pathW))
 	gap := max(2, w-lipgloss.Width(left)-lipgloss.Width(summary)-1)
 	return left + strings.Repeat(" ", gap) + summary
 }
@@ -535,6 +537,10 @@ func (m model) table(inner int) string {
 		chg := dimStyle.Render("clean")
 		if s.Changes > 0 {
 			chg = warnStyle.Render(fmt.Sprintf("● %d", s.Changes))
+		}
+
+		if v.statusErr != nil {
+			br, sync, chg = errStyle.Render(truncate(v.statusErr.Error(), branchW)), dimStyle.Render("–"), dimStyle.Render("–")
 		}
 
 		status := " "
@@ -653,14 +659,19 @@ func (m model) View() string {
 }
 
 func main() {
-	root := filepath.Join(os.Getenv("HOME"), "redberry", "plannr")
+	root := "."
 	if len(os.Args) > 1 {
 		root = os.Args[1]
 	}
 	root, _ = filepath.Abs(root)
 
+	found, err := LoadRepos(root)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "repotui:", err)
+		os.Exit(1)
+	}
 	var repos []repoView
-	for _, r := range FindRepos(root) {
+	for _, r := range found {
 		repos = append(repos, repoView{repo: r})
 	}
 

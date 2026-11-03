@@ -51,6 +51,13 @@ func FindRepos(root string) []Repo {
 }
 
 func (r Repo) Status() (Status, error) {
+	// Without these checks a path inside another repo would silently report that repo's status.
+	if _, err := os.Stat(r.Path); err != nil {
+		return Status{}, errors.New("folder not found")
+	}
+	if _, err := os.Stat(filepath.Join(r.Path, ".git")); err != nil {
+		return Status{}, errors.New("not a git repo")
+	}
 	out, err := r.git("status", "--porcelain=v2", "--branch")
 	if err != nil {
 		return Status{}, err
