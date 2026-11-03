@@ -3,9 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -13,20 +11,14 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-type repo struct {
-	name, path    string
-	branch        string
-	ahead, behind int
-	hasUpstream   bool
-	dirty         int
-	busy          bool
-	msg           string
-	failed        bool
-}
-
-type branch struct {
-	name   string
-	remote bool
+// repoView is one row of the table: the latest git snapshot, refreshed on a timer, and the state of the last action run from the app.
+type repoView struct {
+	repo      Repo
+	status    Status
+	statusErr error
+	busy      bool
+	msg       string
+	failed    bool
 }
 
 type logEntry struct {
@@ -47,10 +39,10 @@ const (
 
 type model struct {
 	root          string
-	repos         []repo
+	repos         []repoView
 	cursor        int
 	mode          mode
-	branches      []branch
+	branches      []Branch
 	bcursor       int
 	filter        string
 	input         string
@@ -61,26 +53,26 @@ type model struct {
 }
 
 type statusMsg struct {
-	idx int
-	r   repo
+	idx    int
+	status Status
+	err    error
 }
 
-type opDoneMsg struct {
-	idx int
-	op  string
-	out string
-	err error
+type actionDoneMsg struct {
+	idx   int
+	label string
+	err   error
+}
+
+type branchesMsg struct {
+	idx  int
+	list []Branch
+	err  error
 }
 
 type tickMsg struct{}
 
 type spinMsg struct{}
-
-type branchesMsg struct {
-	idx  int
-	list []branch
-	err  error
-}
 
 var (
 	pink   = lipgloss.Color("212")
@@ -107,122 +99,45 @@ var (
 	spinner = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 )
 
-func git(dir string, args ...string) (string, error) {
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
-	out, err := cmd.CombinedOutput()
-	return strings.TrimSpace(string(out)), err
-}
-
-func lastLine(s string) string {
-	lines := strings.Split(strings.TrimSpace(s), "\n")
-	return strings.TrimSpace(lines[len(lines)-1])
-}
-
-func findRepos(root string) []repo {
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		return nil
-	}
-	var repos []repo
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		p := filepath.Join(root, e.Name())
-		if _, err := os.Stat(filepath.Join(p, ".git")); err == nil {
-			repos = append(repos, repo{name: e.Name(), path: p})
-		}
-	}
-	return repos
-}
-
-func loadStatus(idx int, r repo) tea.Cmd {
+func loadStatus(idx int, r Repo) tea.Cmd {
 	return func() tea.Msg {
-		out, err := git(r.path, "status", "--porcelain=v2", "--branch")
-		if err != nil {
-			r.msg, r.failed = lastLine(out), true
-			return statusMsg{idx, r}
-		}
-		r.ahead, r.behind, r.dirty, r.hasUpstream = 0, 0, 0, false
-		for _, line := range strings.Split(out, "\n") {
-			switch {
-			case strings.HasPrefix(line, "# branch.head "):
-				r.branch = strings.TrimPrefix(line, "# branch.head ")
-			case strings.HasPrefix(line, "# branch.upstream "):
-				r.hasUpstream = true
-			case strings.HasPrefix(line, "# branch.ab "):
-				fmt.Sscanf(strings.TrimPrefix(line, "# branch.ab "), "+%d -%d", &r.ahead, &r.behind)
-			case line != "" && !strings.HasPrefix(line, "#"):
-				r.dirty++
-			}
-		}
-		return statusMsg{idx, r}
+		s, err := r.Status()
+		return statusMsg{idx: idx, status: s, err: err}
 	}
 }
 
-func runOp(idx int, path, op string, args ...string) tea.Cmd {
+func loadBranches(idx int, r Repo) tea.Cmd {
 	return func() tea.Msg {
-		out, err := git(path, args...)
-		return opDoneMsg{idx: idx, op: op, out: out, err: err}
+		list, err := r.Branches()
+		return branchesMsg{idx: idx, list: list, err: err}
 	}
 }
 
-func checkoutDefault(idx int, path string) tea.Cmd {
+// action runs a Repo call in the background; run returns the label shown in the activity panel.
+func action(idx int, run func() (string, error)) tea.Cmd {
 	return func() tea.Msg {
-		def := ""
-		if out, err := git(path, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"); err == nil {
-			def = strings.TrimPrefix(out, "origin/")
-		} else {
-			for _, b := range []string{"master", "main"} {
-				if _, err := git(path, "rev-parse", "--verify", "--quiet", "refs/heads/"+b); err == nil {
-					def = b
-					break
-				}
-			}
-		}
-		if def == "" {
-			return opDoneMsg{idx: idx, op: "checkout default", err: fmt.Errorf("no default branch found")}
-		}
-		out, err := git(path, "checkout", def)
-		return opDoneMsg{idx: idx, op: "checkout " + def, out: out, err: err}
+		label, err := run()
+		return actionDoneMsg{idx: idx, label: label, err: err}
 	}
 }
 
-func loadBranches(idx int, path string) tea.Cmd {
-	return func() tea.Msg {
-		out, err := git(path, "for-each-ref", "--sort=-committerdate", "--format=%(refname)", "refs/heads", "refs/remotes")
-		if err != nil {
-			return branchesMsg{idx: idx, err: fmt.Errorf("%s", lastLine(out))}
-		}
-		seen := map[string]bool{}
-		var local, remote []branch
-		for _, ref := range strings.Split(out, "\n") {
-			if name, ok := strings.CutPrefix(ref, "refs/heads/"); ok {
-				seen[name] = true
-				local = append(local, branch{name: name})
-			}
-		}
-		for _, ref := range strings.Split(out, "\n") {
-			rest, ok := strings.CutPrefix(ref, "refs/remotes/")
-			if !ok {
-				continue
-			}
-			_, name, ok := strings.Cut(rest, "/")
-			if !ok || name == "HEAD" || seen[name] {
-				continue
-			}
-			seen[name] = true
-			remote = append(remote, branch{name: name, remote: true})
-		}
-		return branchesMsg{idx: idx, list: append(local, remote...)}
-	}
+func pull(i int, r Repo) tea.Cmd {
+	return action(i, func() (string, error) { return "pull", r.Pull() })
 }
 
-func stash(idx int, path string) tea.Cmd {
-	message := "repotui " + time.Now().Format("2006-01-02 15:04")
-	return runOp(idx, path, "stash", "stash", "push", "--include-untracked", "-m", message)
+func fetch(i int, r Repo) tea.Cmd {
+	return action(i, func() (string, error) { return "fetch", r.Fetch() })
+}
+
+func stash(i int, r Repo) tea.Cmd {
+	return action(i, func() (string, error) { return "stash", r.Stash() })
+}
+
+func checkoutDefault(i int, r Repo) tea.Cmd {
+	return action(i, func() (string, error) {
+		name, err := r.CheckoutDefault()
+		return "checkout " + name, err
+	})
 }
 
 func (m *model) addLog(repo, text string, failed bool) {
@@ -239,9 +154,9 @@ func (m *model) start(idx int, cmd tea.Cmd) tea.Cmd {
 	return cmd
 }
 
-func (m model) matches(r repo) bool {
+func (m model) matches(v repoView) bool {
 	q := strings.ToLower(m.search)
-	return strings.Contains(strings.ToLower(r.name), q) || strings.Contains(strings.ToLower(r.branch), q)
+	return strings.Contains(strings.ToLower(v.repo.Name), q) || strings.Contains(strings.ToLower(v.status.Branch), q)
 }
 
 func (m *model) moveCursor(dir int) {
@@ -257,32 +172,32 @@ func (m *model) fixCursor() {
 	if m.matches(m.repos[m.cursor]) {
 		return
 	}
-	for i, r := range m.repos {
-		if m.matches(r) {
+	for i, v := range m.repos {
+		if m.matches(v) {
 			m.cursor = i
 			return
 		}
 	}
 }
 
-func (m *model) forAll(build func(i int, r repo) tea.Cmd) tea.Cmd {
+func (m *model) forAll(build func(i int, r Repo) tea.Cmd) tea.Cmd {
 	var cmds []tea.Cmd
-	for i, r := range m.repos {
-		if r.busy || !m.matches(r) {
+	for i, v := range m.repos {
+		if v.busy || !m.matches(v) {
 			continue
 		}
-		cmds = append(cmds, m.start(i, build(i, r)))
+		cmds = append(cmds, m.start(i, build(i, v.repo)))
 	}
 	return tea.Batch(cmds...)
 }
 
-func (m model) filtered() []branch {
+func (m model) filtered() []Branch {
 	if m.filter == "" {
 		return m.branches
 	}
-	var out []branch
+	var out []Branch
 	for _, b := range m.branches {
-		if strings.Contains(strings.ToLower(b.name), strings.ToLower(m.filter)) {
+		if strings.Contains(strings.ToLower(b.Name), strings.ToLower(m.filter)) {
 			out = append(out, b)
 		}
 	}
@@ -299,9 +214,9 @@ func spin() tea.Cmd {
 
 func (m model) refresh() tea.Cmd {
 	var cmds []tea.Cmd
-	for i, r := range m.repos {
-		if !r.busy {
-			cmds = append(cmds, loadStatus(i, r))
+	for i, v := range m.repos {
+		if !v.busy {
+			cmds = append(cmds, loadStatus(i, v.repo))
 		}
 	}
 	return tea.Batch(cmds...)
@@ -321,31 +236,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.frame++
 		return m, spin()
 	case statusMsg:
-		r := msg.r
-		r.busy = m.repos[msg.idx].busy
-		r.msg, r.failed = m.repos[msg.idx].msg, m.repos[msg.idx].failed
-		if msg.r.failed {
-			r.msg, r.failed = msg.r.msg, true
+		v := &m.repos[msg.idx]
+		v.statusErr = msg.err
+		if msg.err == nil {
+			v.status = msg.status
 		}
-		m.repos[msg.idx] = r
-	case opDoneMsg:
-		r := &m.repos[msg.idx]
-		r.busy = false
+	case actionDoneMsg:
+		v := &m.repos[msg.idx]
+		v.busy, v.msg, v.failed = false, msg.label, msg.err != nil
 		if msg.err != nil {
-			detail := msg.out
-			if detail == "" {
-				detail = msg.err.Error()
-			}
-			r.failed = true
-			r.msg = msg.op + ": " + lastLine(detail)
-		} else {
-			r.msg = msg.op
+			v.msg = msg.label + ": " + msg.err.Error()
 		}
-		m.addLog(r.name, r.msg, r.failed)
-		return m, loadStatus(msg.idx, *r)
+		m.addLog(v.repo.Name, v.msg, v.failed)
+		return m, loadStatus(msg.idx, v.repo)
 	case branchesMsg:
 		if msg.err != nil {
-			m.repos[msg.idx].msg, m.repos[msg.idx].failed = msg.err.Error(), true
+			m.addLog(m.repos[msg.idx].repo.Name, "branches: "+msg.err.Error(), true)
 			return m, nil
 		}
 		m.branches, m.bcursor, m.filter, m.mode = msg.list, 0, "", modeBranches
@@ -371,7 +277,7 @@ func (m model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
-	r := m.repos[m.cursor]
+	v := m.repos[m.cursor]
 	switch msg.String() {
 	case "q", "ctrl+c":
 		return m, tea.Quit
@@ -384,7 +290,7 @@ func (m model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "r":
 		return m, m.refresh()
 	}
-	if !m.matches(r) {
+	if !m.matches(v) {
 		return m, nil
 	}
 	switch msg.String() {
@@ -393,44 +299,41 @@ func (m model) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "down", "j":
 		m.moveCursor(1)
 	case "enter", "b":
-		return m, loadBranches(m.cursor, r.path)
-	case "p":
-		if !r.busy {
-			return m, m.start(m.cursor, runOp(m.cursor, r.path, "pull", "pull", "--ff-only"))
-		}
+		return m, loadBranches(m.cursor, v.repo)
+	case "n":
+		m.mode, m.input = modeNewBranch, ""
 	case "P":
-		return m, m.forAll(func(i int, r repo) tea.Cmd { return runOp(i, r.path, "pull", "pull", "--ff-only") })
-	case "f":
-		if !r.busy {
-			return m, m.start(m.cursor, runOp(m.cursor, r.path, "fetch", "fetch", "--prune"))
-		}
+		return m, m.forAll(pull)
 	case "F":
-		return m, m.forAll(func(i int, r repo) tea.Cmd { return runOp(i, r.path, "fetch", "fetch", "--prune") })
-	case "m":
-		if !r.busy {
-			return m, m.start(m.cursor, checkoutDefault(m.cursor, r.path))
-		}
+		return m, m.forAll(fetch)
 	case "M":
-		return m, m.forAll(func(i int, r repo) tea.Cmd { return checkoutDefault(i, r.path) })
-	case "s":
-		if r.busy {
-			return m, nil
-		}
-		if r.dirty == 0 {
-			m.addLog(r.name, "nothing to stash", false)
-			return m, nil
-		}
-		return m, m.start(m.cursor, stash(m.cursor, r.path))
+		return m, m.forAll(checkoutDefault)
 	case "S":
 		var cmds []tea.Cmd
-		for i, r := range m.repos {
-			if !r.busy && r.dirty > 0 && m.matches(r) {
-				cmds = append(cmds, m.start(i, stash(i, r.path)))
+		for i, v := range m.repos {
+			if !v.busy && v.status.Changes > 0 && m.matches(v) {
+				cmds = append(cmds, m.start(i, stash(i, v.repo)))
 			}
 		}
 		return m, tea.Batch(cmds...)
-	case "n":
-		m.mode, m.input = modeNewBranch, ""
+	}
+
+	if v.busy {
+		return m, nil
+	}
+	switch msg.String() {
+	case "p":
+		return m, m.start(m.cursor, pull(m.cursor, v.repo))
+	case "f":
+		return m, m.start(m.cursor, fetch(m.cursor, v.repo))
+	case "m":
+		return m, m.start(m.cursor, checkoutDefault(m.cursor, v.repo))
+	case "s":
+		if v.status.Changes == 0 {
+			m.addLog(v.repo.Name, "nothing to stash", false)
+			return m, nil
+		}
+		return m, m.start(m.cursor, stash(m.cursor, v.repo))
 	}
 	return m, nil
 }
@@ -473,10 +376,10 @@ func (m model) updateBranches(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if len(list) == 0 {
 			return m, nil
 		}
-		b := list[m.bcursor]
+		name := list[m.bcursor].Name
 		m.mode = modeList
-		r := m.repos[m.cursor]
-		return m, m.start(m.cursor, runOp(m.cursor, r.path, "checkout "+b.name, "checkout", b.name))
+		r := m.repos[m.cursor].repo
+		return m, m.start(m.cursor, action(m.cursor, func() (string, error) { return "checkout " + name, r.Checkout(name) }))
 	case tea.KeyBackspace:
 		if m.filter != "" {
 			m.filter = m.filter[:len(m.filter)-1]
@@ -501,8 +404,8 @@ func (m model) updateNewBranch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if name == "" {
 			return m, nil
 		}
-		r := m.repos[m.cursor]
-		return m, m.start(m.cursor, runOp(m.cursor, r.path, "new branch "+name, "checkout", "-b", name))
+		r := m.repos[m.cursor].repo
+		return m, m.start(m.cursor, action(m.cursor, func() (string, error) { return "new branch " + name, r.CreateBranch(name) }))
 	case tea.KeyBackspace:
 		if m.input != "" {
 			m.input = m.input[:len(m.input)-1]
@@ -555,11 +458,11 @@ func helpLine(width int, keys ...string) string {
 
 func (m model) header(w int) string {
 	changed, behind := 0, 0
-	for _, r := range m.repos {
-		if r.dirty > 0 {
+	for _, v := range m.repos {
+		if v.status.Changes > 0 {
 			changed++
 		}
-		if r.behind > 0 {
+		if v.status.Behind > 0 {
 			behind++
 		}
 	}
@@ -578,8 +481,8 @@ func (m model) header(w int) string {
 func (m model) table(inner int) string {
 	const syncW, chgW, stW = 9, 7, 1
 	nameW := len("REPO")
-	for _, r := range m.repos {
-		nameW = max(nameW, len(r.name))
+	for _, v := range m.repos {
+		nameW = max(nameW, len(v.repo.Name))
 	}
 	branchW := max(12, inner-nameW-syncW-chgW-stW-10)
 
@@ -590,52 +493,53 @@ func (m model) table(inner int) string {
 	}
 
 	shown := 0
-	for i, r := range m.repos {
-		if !m.matches(r) {
+	for i, v := range m.repos {
+		if !m.matches(v) {
 			continue
 		}
 		shown++
+		s := v.status
 		selected := i == m.cursor && (m.mode == modeList || m.mode == modeSearch)
 
-		marker, name := "  ", r.name
+		marker, name := "  ", v.repo.Name
 		if selected {
-			marker, name = accentStyle.Render("▌ "), accentStyle.Render(r.name)
+			marker, name = accentStyle.Render("▌ "), accentStyle.Render(v.repo.Name)
 		} else if i == m.cursor {
-			name = lipgloss.NewStyle().Bold(true).Render(r.name)
+			name = lipgloss.NewStyle().Bold(true).Render(v.repo.Name)
 		}
 
 		bs := branchStyle
-		if r.branch == "master" || r.branch == "main" {
+		if s.Branch == "master" || s.Branch == "main" {
 			bs = mainStyle
 		}
-		br := bs.Render(truncate(r.branch, branchW))
+		br := bs.Render(truncate(s.Branch, branchW))
 
 		sync := dimStyle.Render("local")
-		if r.hasUpstream {
+		if s.HasUpstream {
 			sync = okStyle.Render("✓ synced")
-			if r.ahead > 0 || r.behind > 0 {
+			if s.Ahead > 0 || s.Behind > 0 {
 				sync = ""
-				if r.ahead > 0 {
-					sync += okStyle.Render(fmt.Sprintf("↑%d ", r.ahead))
+				if s.Ahead > 0 {
+					sync += okStyle.Render(fmt.Sprintf("↑%d ", s.Ahead))
 				}
-				if r.behind > 0 {
-					sync += warnStyle.Render(fmt.Sprintf("↓%d", r.behind))
+				if s.Behind > 0 {
+					sync += warnStyle.Render(fmt.Sprintf("↓%d", s.Behind))
 				}
 			}
 		}
 
 		chg := dimStyle.Render("clean")
-		if r.dirty > 0 {
-			chg = warnStyle.Render(fmt.Sprintf("● %d", r.dirty))
+		if s.Changes > 0 {
+			chg = warnStyle.Render(fmt.Sprintf("● %d", s.Changes))
 		}
 
 		status := " "
 		switch {
-		case r.busy:
+		case v.busy:
 			status = accentStyle.Render(spinner[m.frame%len(spinner)])
-		case r.failed:
+		case v.failed, v.statusErr != nil:
 			status = errStyle.Render("✗")
-		case r.msg != "":
+		case v.msg != "":
 			status = okStyle.Render("✓")
 		}
 
@@ -670,9 +574,9 @@ func (m model) activity(inner int) string {
 
 func (m model) picker(inner, visible int) string {
 	list := m.filtered()
-	r := m.repos[m.cursor]
+	v := m.repos[m.cursor]
 	lines := []string{
-		accentStyle.Render("Switch branch") + dimStyle.Render(" · "+r.name),
+		accentStyle.Render("Switch branch") + dimStyle.Render(" · "+v.repo.Name),
 		accentStyle.Render("/ ") + m.filter + accentStyle.Render("█"),
 		"",
 	}
@@ -683,13 +587,13 @@ func (m model) picker(inner, visible int) string {
 	for i := start; i < len(list) && i < start+visible; i++ {
 		b := list[i]
 		tag := ""
-		if b.remote {
+		if b.Remote {
 			tag = dimStyle.Render("  remote")
 		}
-		if b.name == r.branch {
+		if b.Name == v.status.Branch {
 			tag = okStyle.Render("  ● current")
 		}
-		name := truncate(b.name, inner-lipgloss.Width(tag)-2)
+		name := truncate(b.Name, inner-lipgloss.Width(tag)-2)
 		if i == m.bcursor {
 			lines = append(lines, accentStyle.Render("▌ "+name)+tag)
 		} else {
@@ -733,7 +637,7 @@ func (m model) View() string {
 			"↑↓", "move", "/", "search", "enter", "branches", "p/P", "pull one/all", "f/F", "fetch one/all",
 			"m/M", "master/main one/all", "s/S", "stash one/all", "n", "new branch", "r", "refresh", "q", "quit"))
 	case modeNewBranch:
-		box := accentStyle.Render("New branch") + dimStyle.Render(" · "+m.repos[m.cursor].name) + "\n" +
+		box := accentStyle.Render("New branch") + dimStyle.Render(" · "+m.repos[m.cursor].repo.Name) + "\n" +
 			accentStyle.Render("› ") + m.input + accentStyle.Render("█")
 		sections = append(sections, pickerStyle.Width(inner+2).Render(box), helpLine(w-2, "enter", "create", "esc", "cancel"))
 	case modeBranches:
@@ -750,8 +654,11 @@ func main() {
 		root = os.Args[1]
 	}
 	root, _ = filepath.Abs(root)
-	repos := findRepos(root)
-	sort.Slice(repos, func(i, j int) bool { return repos[i].name < repos[j].name })
+
+	var repos []repoView
+	for _, r := range FindRepos(root) {
+		repos = append(repos, repoView{repo: r})
+	}
 
 	if _, err := tea.NewProgram(model{root: root, repos: repos}, tea.WithAltScreen()).Run(); err != nil {
 		fmt.Println(err)
