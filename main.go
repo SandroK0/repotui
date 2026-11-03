@@ -444,7 +444,7 @@ func helpLine(width int, keys ...string) string {
 	line := ""
 	for i := 0; i+1 < len(keys); i += 2 {
 		item := accentStyle.Render(keys[i]) + " " + dimStyle.Render(keys[i+1])
-		if line != "" && lipgloss.Width(line)+3+lipgloss.Width(item) > width {
+		if line != "" && lipgloss.Width(line)+3+lipgloss.Width(item) > width-8 {
 			lines = append(lines, line)
 			line = ""
 		}
@@ -453,7 +453,11 @@ func helpLine(width int, keys ...string) string {
 		}
 		line += item
 	}
-	return " " + strings.Join(append(lines, line), "\n ")
+	lines = append(lines, line)
+	for i, l := range lines {
+		lines[i] = lipgloss.PlaceHorizontal(width, lipgloss.Center, l)
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (m model) header(w int) string {
@@ -625,7 +629,7 @@ func (m model) View() string {
 	case modeSearch:
 		sections = append(sections,
 			" "+accentStyle.Render("/")+" "+m.search+accentStyle.Render("█"),
-			helpLine(w-2, "type", "filter by repo or branch", "↑↓", "move", "enter", "keep filter", "esc", "clear"))
+			helpLine(w, "type", "filter by repo or branch", "↑↓", "move", "enter", "keep filter", "esc", "clear"))
 	case modeList:
 		if m.search != "" {
 			sections = append(sections, " "+dimStyle.Render("filter: ")+accentStyle.Render(m.search)+dimStyle.Render("  (esc to clear, actions on all apply to these only)"))
@@ -633,17 +637,17 @@ func (m model) View() string {
 		if a := m.activity(inner); a != "" {
 			sections = append(sections, a)
 		}
-		sections = append(sections, helpLine(w-2,
+		sections = append(sections, helpLine(w,
 			"↑↓", "move", "/", "search", "enter", "branches", "p/P", "pull one/all", "f/F", "fetch one/all",
 			"m/M", "master/main one/all", "s/S", "stash one/all", "n", "new branch", "r", "refresh", "q", "quit"))
 	case modeNewBranch:
 		box := accentStyle.Render("New branch") + dimStyle.Render(" · "+m.repos[m.cursor].repo.Name) + "\n" +
 			accentStyle.Render("› ") + m.input + accentStyle.Render("█")
-		sections = append(sections, pickerStyle.Width(inner+2).Render(box), helpLine(w-2, "enter", "create", "esc", "cancel"))
+		sections = append(sections, pickerStyle.Width(inner+2).Render(box), helpLine(w, "enter", "create", "esc", "cancel"))
 	case modeBranches:
 		visible := max(5, m.height-len(m.repos)-16)
 		sections = append(sections, m.picker(inner, visible),
-			helpLine(w-2, "type", "filter", "↑↓", "move", "enter", "checkout", "esc", "back"))
+			helpLine(w, "type", "filter", "↑↓", "move", "enter", "checkout", "esc", "back"))
 	}
 	return strings.Join(sections, "\n")
 }
