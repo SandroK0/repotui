@@ -10,6 +10,7 @@ A terminal UI for keeping an eye on a folder full of git repos. See every repo's
 - **Live**: re-reads every repo every 3 seconds, so changes made in your editor or another terminal show up on their own.
 - **Switch branches** from a filterable picker that includes branches that only exist on the remote.
 - **Pull, fetch, stash and jump to master/main** for one repo or all of them at once.
+- **Diff view**: list a repo's changed files and read each one's diff without leaving the app.
 - **Search** repos by name or branch, vi-style, and run the "all" actions on just the matches.
 - **Activity panel** with the result of each action, including git's own error message when something fails.
 
@@ -66,6 +67,7 @@ sdk = ~/some/other/place/plannr-nuxt-api-sdk
 | `m` / `M` | Switch to master or main in the selected repo / all repos |
 | `s` / `S` | Stash changes in the selected repo / all repos with changes |
 | `n` | Create a new branch in the selected repo |
+| `d` | Show the selected repo's changed files and their diffs |
 | `r` | Refresh now |
 | `q` | Quit |
 
@@ -76,6 +78,16 @@ While a search is active, the "all" keys (`P`, `F`, `M`, `S`) only act on the re
 ![Branch picker](docs/screenshots/branches.png)
 
 Type to filter, `↑` `↓` to move, `enter` to check out. Branches that only exist on the remote are tagged `remote`; checking one out creates a local branch that tracks it.
+
+### Reading diffs
+
+![Diff view](docs/screenshots/diff.png)
+
+Press `d` on a repo with changes to list its changed files: `M` modified, `A` added, `D` deleted, `R` renamed and `?` untracked. Press `enter` to open a file's diff. Staged and unstaged edits are shown together as one diff against the last commit, and an untracked file is shown as all added lines.
+
+In the diff, `↑` `↓` / `j` `k` scroll, `space` / `b` page, `g` / `G` jump to the top or bottom, and `n` / `p` move to the next or previous file, and `s` switches between the unified view and a side-by-side view with the old file on the left and the new one on the right. The layout you pick stays in place as you move between files. `esc` goes back to the file list, and `esc` again back to the repos. The 3-second refresh doesn't touch an open diff; press `r` in the file list to reload it.
+
+![Side-by-side diff](docs/screenshots/diff-split.png)
 
 ### Searching
 

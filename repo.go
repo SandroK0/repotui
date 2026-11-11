@@ -31,6 +31,16 @@ type Branch struct {
 	Remote bool
 }
 
+// Change is one file that differs from HEAD. Code is M, A, D, R or ? (untracked); OldPath is set for renames.
+type Change struct {
+	Path    string
+	OldPath string
+	Code    string
+}
+
+// emptyTree is git's well-known hash of an empty tree, used as the base when a repo has no commits yet.
+const emptyTree = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+
 func FindRepos(root string) []Repo {
 	entries, err := os.ReadDir(root)
 	if err != nil {
@@ -153,7 +163,91 @@ func (r Repo) Stash() error {
 	return err
 }
 
+// Changes lists every file that differs from HEAD, staged or not, including each untracked file.
+func (r Repo) Changes() ([]Change, error) {
+	out, err := r.gitRaw("status", "--porcelain=v1", "-z", "--untracked-files=all")
+	if err != nil {
+		return nil, err
+	}
+	var list []Change
+	fields := strings.Split(out, "\x00")
+	for i := 0; i < len(fields); i++ {
+		f := fields[i]
+		if len(f) < 4 {
+			continue
+		}
+		x, y, path := f[0], f[1], f[3:]
+		c := Change{Path: path}
+		switch {
+		case x == '?':
+			c.Code = "?"
+		case x == 'R' || y == 'R':
+			c.Code = "R"
+			if i+1 < len(fields) {
+				i++
+				c.OldPath = fields[i]
+			}
+		case x == 'A':
+			c.Code = "A"
+		case x == 'D' || y == 'D':
+			c.Code = "D"
+		default:
+			c.Code = "M"
+		}
+		list = append(list, c)
+	}
+	return list, nil
+}
+
+// Diff returns the unified diff of one change against HEAD, covering staged and unstaged edits together.
+// An untracked file is shown as entirely added.
+func (r Repo) Diff(c Change) ([]string, error) {
+	if c.Code == "?" {
+		raw, err := os.ReadFile(filepath.Join(r.Path, c.Path))
+		if err != nil {
+			return nil, err
+		}
+		if strings.ContainsRune(string(raw), 0) {
+			return []string{"Binary file " + c.Path + " is untracked"}, nil
+		}
+		text := strings.TrimSuffix(string(raw), "\n")
+		if text == "" {
+			return []string{"Empty file " + c.Path + " is untracked"}, nil
+		}
+		lines := strings.Split(text, "\n")
+		out := []string{fmt.Sprintf("@@ -0,0 +1,%d @@", len(lines))}
+		for _, l := range lines {
+			out = append(out, "+"+l)
+		}
+		return out, nil
+	}
+
+	base := "HEAD"
+	if _, err := r.git("rev-parse", "--verify", "--quiet", "HEAD"); err != nil {
+		base = emptyTree
+	}
+	args := []string{"diff", "--no-color", "--no-ext-diff", "-M", base, "--"}
+	if c.OldPath != "" {
+		args = append(args, c.OldPath)
+	}
+	out, err := r.gitRaw(append(args, c.Path)...)
+	if err != nil {
+		return nil, err
+	}
+	out = strings.TrimRight(out, "\n")
+	if out == "" {
+		return []string{"No differences"}, nil
+	}
+	return strings.Split(out, "\n"), nil
+}
+
 func (r Repo) git(args ...string) (string, error) {
+	out, err := r.gitRaw(args...)
+	return strings.TrimSpace(out), err
+}
+
+// gitRaw runs git and returns its output untouched, for formats where leading spaces matter.
+func (r Repo) gitRaw(args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), gitTimeout)
 	defer cancel()
 
@@ -161,7 +255,7 @@ func (r Repo) git(args ...string) (string, error) {
 	cmd.Dir = r.Path
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	raw, err := cmd.CombinedOutput()
-	out := strings.TrimSpace(string(raw))
+	out := string(raw)
 
 	switch {
 	case ctx.Err() == context.DeadlineExceeded:

@@ -225,3 +225,92 @@ func TestPullFastForwards(t *testing.T) {
 		t.Fatalf("still behind: %+v", s)
 	}
 }
+
+func TestChangesListsEachKindOfChange(t *testing.T) {
+	_, repo := setup(t)
+	commit(t, repo.Path, "gone")
+	commit(t, repo.Path, "old")
+	os.WriteFile(filepath.Join(repo.Path, "readme"), []byte("edited"), 0o644)
+	os.Remove(filepath.Join(repo.Path, "gone"))
+	run(t, repo.Path, "mv", "old", "renamed")
+	os.WriteFile(filepath.Join(repo.Path, "staged"), []byte("s"), 0o644)
+	run(t, repo.Path, "add", "staged")
+	os.MkdirAll(filepath.Join(repo.Path, "dir"), 0o755)
+	os.WriteFile(filepath.Join(repo.Path, "dir", "untracked"), []byte("u"), 0o644)
+
+	got, err := repo.Changes()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := map[string]Change{
+		"readme":        {Path: "readme", Code: "M"},
+		"gone":          {Path: "gone", Code: "D"},
+		"renamed":       {Path: "renamed", OldPath: "old", Code: "R"},
+		"staged":        {Path: "staged", Code: "A"},
+		"dir/untracked": {Path: "dir/untracked", Code: "?"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %+v", got)
+	}
+	for _, c := range got {
+		if want[c.Path] != c {
+			t.Errorf("got %+v, want %+v", c, want[c.Path])
+		}
+	}
+}
+
+func TestChangesOfCleanRepoIsEmpty(t *testing.T) {
+	_, repo := setup(t)
+
+	got, err := repo.Changes()
+
+	if err != nil || len(got) != 0 {
+		t.Fatalf("got %+v, %v", got, err)
+	}
+}
+
+func TestDiffCombinesStagedAndUnstagedEdits(t *testing.T) {
+	_, repo := setup(t)
+	os.WriteFile(filepath.Join(repo.Path, "readme"), []byte("one\n"), 0o644)
+	run(t, repo.Path, "add", "readme")
+	os.WriteFile(filepath.Join(repo.Path, "readme"), []byte("one\ntwo\n"), 0o644)
+
+	lines, err := repo.Diff(Change{Path: "readme", Code: "M"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	text := strings.Join(lines, "\n")
+	for _, want := range []string{"-readme", "+one", "+two", "@@"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("diff missing %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestDiffShowsUntrackedFileAsAdded(t *testing.T) {
+	_, repo := setup(t)
+	os.WriteFile(filepath.Join(repo.Path, "new"), []byte("a\nb\n"), 0o644)
+
+	lines, err := repo.Diff(Change{Path: "new", Code: "?"})
+
+	if err != nil || strings.Join(lines, "\n") != "@@ -0,0 +1,2 @@\n+a\n+b" {
+		t.Fatalf("got %q, %v", lines, err)
+	}
+}
+
+func TestDiffWorksBeforeTheFirstCommit(t *testing.T) {
+	isolateGit(t)
+	dir := t.TempDir()
+	run(t, dir, "init", "-q")
+	os.WriteFile(filepath.Join(dir, "a"), []byte("hello\n"), 0o644)
+	run(t, dir, "add", "a")
+	repo := Repo{Name: "fresh", Path: dir}
+
+	lines, err := repo.Diff(Change{Path: "a", Code: "A"})
+
+	if err != nil || !strings.Contains(strings.Join(lines, "\n"), "+hello") {
+		t.Fatalf("got %q, %v", lines, err)
+	}
+}

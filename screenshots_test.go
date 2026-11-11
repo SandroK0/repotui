@@ -27,12 +27,14 @@ type showcaseRepo struct {
 	behind   int
 	changes  int
 	local    bool
+	readme   string
 }
 
 var showcase = []showcaseRepo{
 	{name: "auth-service", branches: []string{"feat/oauth-scopes", "fix/token-refresh", "chore/bump-deps"}, checkout: "feat/oauth-scopes", ahead: 2},
 	{name: "billing-service", checkout: "main", behind: 3},
-	{name: "design-system", branches: []string{"fix/button-focus-ring"}, checkout: "fix/button-focus-ring", changes: 4},
+	{name: "design-system", branches: []string{"fix/button-focus-ring"}, checkout: "fix/button-focus-ring", changes: 3,
+		readme: "# design-system\n\nShared UI components for every Acme app.\n\n## Focus rings\n\nButtons now show a 2px focus ring in the accent colour\nwhen reached with the keyboard, and none on mouse click.\n"},
 	{name: "docs", checkout: "main"},
 	{name: "mobile-app", branches: []string{"release/2.4.0"}, checkout: "release/2.4.0", ahead: 1, behind: 2},
 	{name: "notification-service", checkout: "main", changes: 1},
@@ -78,42 +80,11 @@ func buildShowcase(t *testing.T) string {
 		for i := range s.changes {
 			os.WriteFile(filepath.Join(clone, "wip-"+string(rune('a'+i))), []byte("wip"), 0o644)
 		}
+		if s.readme != "" {
+			os.WriteFile(filepath.Join(clone, "README.md"), []byte(s.readme), 0o644)
+		}
 	}
 	return root
-}
-
-// drive feeds a command's messages back into the model until nothing is left to run.
-func drive(m tea.Model, cmd tea.Cmd) tea.Model {
-	if cmd == nil {
-		return m
-	}
-	msg := cmd()
-	if batch, ok := msg.(tea.BatchMsg); ok {
-		for _, c := range batch {
-			m = drive(m, c)
-		}
-		return m
-	}
-	m, next := m.Update(msg)
-	return drive(m, next)
-}
-
-func press(m tea.Model, keys ...string) tea.Model {
-	for _, k := range keys {
-		var msg tea.KeyMsg
-		switch k {
-		case "enter":
-			msg = tea.KeyMsg{Type: tea.KeyEnter}
-		case "down":
-			msg = tea.KeyMsg{Type: tea.KeyDown}
-		default:
-			msg = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(k)}
-		}
-		var cmd tea.Cmd
-		m, cmd = m.Update(msg)
-		m = drive(m, cmd)
-	}
-	return m
 }
 
 func newShowcaseModel(t *testing.T, root string) tea.Model {
@@ -135,9 +106,11 @@ func TestScreenshots(t *testing.T) {
 	root := buildShowcase(t)
 
 	shots := map[string]tea.Model{
-		"overview": press(newShowcaseModel(t, root), "F", "j", "j", "j", "j", "p", "k", "k", "k", "k"),
-		"branches": press(newShowcaseModel(t, root), "enter", "down"),
-		"search":   press(newShowcaseModel(t, root), "/", "s", "e", "r", "v", "i", "c", "e"),
+		"overview":   press(newShowcaseModel(t, root), "F", "j", "j", "j", "j", "p", "k", "k", "k", "k"),
+		"branches":   press(newShowcaseModel(t, root), "enter", "down"),
+		"search":     press(newShowcaseModel(t, root), "/", "s", "e", "r", "v", "i", "c", "e"),
+		"diff":       press(newShowcaseModel(t, root), "j", "j", "d", "enter"),
+		"diff-split": press(newShowcaseModel(t, root), "j", "j", "d", "enter", "s"),
 	}
 
 	out := filepath.Join("docs", "screenshots")
