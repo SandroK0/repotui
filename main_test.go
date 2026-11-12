@@ -98,6 +98,26 @@ func TestDiffKeysWalkFilesThenDiffAndBack(t *testing.T) {
 	}
 }
 
+func TestDiffShowsLineCountsInFileListAndTitle(t *testing.T) {
+	_, repo := setup(t)
+	os.WriteFile(filepath.Join(repo.Path, "readme"), []byte("one\ntwo\n"), 0o644)
+	os.WriteFile(filepath.Join(repo.Path, "new"), []byte("a\nb\nc\n"), 0o644)
+	var m tea.Model = newModel(t, repo)
+
+	m = press(m, "d")
+	view := m.View()
+	for _, want := range []string{"+5 -1", "+2 -1", "+3"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("file list missing %q:\n%s", want, view)
+		}
+	}
+
+	m = press(m, "enter")
+	if got := m.(model); got.dadd != 2 || got.ddel != 1 || !strings.Contains(m.View(), "+2 -1") {
+		t.Fatalf("diff counts +%d -%d\n%s", got.dadd, got.ddel, m.View())
+	}
+}
+
 func TestRefreshKeepsDiffScrollPosition(t *testing.T) {
 	_, repo := setup(t)
 	var lines []string

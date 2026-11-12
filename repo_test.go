@@ -79,8 +79,9 @@ func TestStatusCountsChangedAndUntrackedFiles(t *testing.T) {
 	os.WriteFile(filepath.Join(repo.Path, "readme"), []byte("edited"), 0o644)
 	os.WriteFile(filepath.Join(repo.Path, "new"), []byte("new"), 0o644)
 
-	if got := status(t, repo).Changes; got != 2 {
-		t.Fatalf("Changes = %d, want 2", got)
+	s := status(t, repo)
+	if s.Changes != 2 || s.Added != 2 || s.Deleted != 1 {
+		t.Fatalf("got %+v, want 2 changes, +2 -1", s)
 	}
 }
 
@@ -244,11 +245,39 @@ func TestChangesListsEachKindOfChange(t *testing.T) {
 	}
 
 	want := map[string]Change{
-		"readme":        {Path: "readme", Code: "M"},
-		"gone":          {Path: "gone", Code: "D"},
+		"readme":        {Path: "readme", Code: "M", Added: 1, Deleted: 1},
+		"gone":          {Path: "gone", Code: "D", Deleted: 1},
 		"renamed":       {Path: "renamed", OldPath: "old", Code: "R"},
-		"staged":        {Path: "staged", Code: "A"},
-		"dir/untracked": {Path: "dir/untracked", Code: "?"},
+		"staged":        {Path: "staged", Code: "A", Added: 1},
+		"dir/untracked": {Path: "dir/untracked", Code: "?", Added: 1},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %+v", got)
+	}
+	for _, c := range got {
+		if want[c.Path] != c {
+			t.Errorf("got %+v, want %+v", c, want[c.Path])
+		}
+	}
+}
+
+func TestChangesCountLinesAcrossStagedAndUnstagedEdits(t *testing.T) {
+	_, repo := setup(t)
+	os.WriteFile(filepath.Join(repo.Path, "readme"), []byte("one\ntwo\n"), 0o644)
+	run(t, repo.Path, "add", "readme")
+	os.WriteFile(filepath.Join(repo.Path, "readme"), []byte("one\ntwo\nthree\n"), 0o644)
+	os.WriteFile(filepath.Join(repo.Path, "new"), []byte("a\nb\nc\n"), 0o644)
+	os.WriteFile(filepath.Join(repo.Path, "blob"), []byte{0, 1, 2}, 0o644)
+
+	got, err := repo.Changes()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := map[string]Change{
+		"readme": {Path: "readme", Code: "M", Added: 3, Deleted: 1},
+		"new":    {Path: "new", Code: "?", Added: 3},
+		"blob":   {Path: "blob", Code: "?", Binary: true},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("got %+v", got)

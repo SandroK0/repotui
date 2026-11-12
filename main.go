@@ -55,6 +55,7 @@ type model struct {
 	files         []Change
 	fcursor       int
 	diff          []string
+	dadd, ddel    int // added and removed lines in diff
 	dscroll       int
 	side          []sideRow
 	split         bool // diff shown side by side; kept when moving between files
@@ -320,6 +321,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.fcursor, m.diff, m.dscroll, m.mode = msg.file, trimDiffHeader(msg.lines), 0, modeDiff
 		m.side = sideBySide(m.diff)
+		m.dadd, m.ddel = diffCounts(m.diff)
 	case tea.KeyMsg:
 		switch m.mode {
 		case modeList:
@@ -587,6 +589,19 @@ func trimDiffHeader(lines []string) []string {
 	return out
 }
 
+// diffCounts counts the added and removed lines of a diff whose file headers are already trimmed.
+func diffCounts(lines []string) (added, deleted int) {
+	for _, l := range lines {
+		switch {
+		case strings.HasPrefix(l, "+"):
+			added++
+		case strings.HasPrefix(l, "-"):
+			deleted++
+		}
+	}
+	return added, deleted
+}
+
 type rowKind int
 
 const (
@@ -753,11 +768,24 @@ func (m model) header(w int) string {
 	return left + strings.Repeat(" ", gap) + summary
 }
 
+// changesCell is the table's CHANGES column: how many files changed and their total changed lines.
+func changesCell(s Status) string {
+	if s.Changes == 0 {
+		return dimStyle.Render("clean")
+	}
+	cell := warnStyle.Render(fmt.Sprintf("● %d", s.Changes))
+	if counts := lineCounts(s.Added, s.Deleted); counts != "" {
+		cell += " " + counts
+	}
+	return cell
+}
+
 func (m model) table(inner int) string {
-	const syncW, chgW, stW = 9, 7, 1
-	nameW := len("REPO")
+	const syncW, stW = 9, 1
+	nameW, chgW := len("REPO"), len("CHANGES")
 	for _, v := range m.repos {
 		nameW = max(nameW, len(v.repo.Name))
+		chgW = max(chgW, lipgloss.Width(changesCell(v.status)))
 	}
 	branchW := max(12, inner-nameW-syncW-chgW-stW-10)
 
@@ -803,10 +831,7 @@ func (m model) table(inner int) string {
 			}
 		}
 
-		chg := dimStyle.Render("clean")
-		if s.Changes > 0 {
-			chg = warnStyle.Render(fmt.Sprintf("● %d", s.Changes))
-		}
+		chg := changesCell(s)
 
 		if v.statusErr != nil {
 			br, sync, chg = errStyle.Render(truncate(v.statusErr.Error(), branchW)), dimStyle.Render("–"), dimStyle.Render("–")
@@ -912,23 +937,52 @@ func changeName(c Change) string {
 	return c.Path
 }
 
+// lineCounts renders "+added -deleted" in diff colours, leaving out a side that is zero.
+func lineCounts(added, deleted int) string {
+	var parts []string
+	if added > 0 {
+		parts = append(parts, addStyle.Render(fmt.Sprintf("+%d", added)))
+	}
+	if deleted > 0 {
+		parts = append(parts, delStyle.Render(fmt.Sprintf("-%d", deleted)))
+	}
+	return strings.Join(parts, " ")
+}
+
+func changeCounts(c Change) string {
+	if c.Binary {
+		return dimStyle.Render("binary")
+	}
+	return lineCounts(c.Added, c.Deleted)
+}
+
 func (m model) fileList(inner, visible int) string {
 	v := m.repos[m.cursor]
-	lines := []string{
-		accentStyle.Render("Changes") + dimStyle.Render(fmt.Sprintf(" · %s · %d files", v.repo.Name, len(m.files))),
-		"",
+	added, deleted, countW := 0, 0, 0
+	for _, c := range m.files {
+		added += c.Added
+		deleted += c.Deleted
+		countW = max(countW, lipgloss.Width(changeCounts(c)))
 	}
+	summary := dimStyle.Render(fmt.Sprintf(" · %s · %d files", v.repo.Name, len(m.files)))
+	if total := lineCounts(added, deleted); total != "" {
+		summary += dimStyle.Render(" · ") + total
+	}
+	lines := []string{accentStyle.Render("Changes") + summary, ""}
 	start := 0
 	if m.fcursor >= visible {
 		start = m.fcursor - visible + 1
 	}
+	nameW := inner - 4 - countW - 2
 	for i := start; i < len(m.files) && i < start+visible; i++ {
 		c := m.files[i]
-		name := truncate(changeName(c), inner-4)
+		name := truncate(changeName(c), nameW)
+		counts := changeCounts(c)
+		counts = strings.Repeat(" ", countW-lipgloss.Width(counts)) + counts
 		if i == m.fcursor {
-			lines = append(lines, accentStyle.Render("▌ ")+changeCode(c.Code)+" "+accentStyle.Render(name))
+			lines = append(lines, accentStyle.Render("▌ ")+changeCode(c.Code)+" "+accentStyle.Render(pad(name, nameW))+"  "+counts)
 		} else {
-			lines = append(lines, "  "+changeCode(c.Code)+" "+name)
+			lines = append(lines, "  "+changeCode(c.Code)+" "+pad(name, nameW)+"  "+counts)
 		}
 	}
 	return pickerStyle.Width(inner + 2).Render(strings.Join(lines, "\n"))
@@ -943,7 +997,11 @@ func (m model) diffView(inner int) string {
 	if total > page {
 		pos = fmt.Sprintf("%d%%", end*100/total)
 	}
-	title := accentStyle.Render(truncate(changeName(c), inner-30)) +
+	counts := lineCounts(m.dadd, m.ddel)
+	if counts != "" {
+		counts = dimStyle.Render(" · ") + counts
+	}
+	title := accentStyle.Render(truncate(changeName(c), inner-30-lipgloss.Width(counts))) + counts +
 		dimStyle.Render(fmt.Sprintf(" · %s · file %d/%d · %s", m.repos[m.cursor].repo.Name, m.fcursor+1, len(m.files), pos))
 	lines := []string{title, ""}
 	if m.split {
